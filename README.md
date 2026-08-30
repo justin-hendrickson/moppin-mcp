@@ -1,3 +1,5 @@
+> **Fork notice:** This is a patched fork of [`@aos-engineer/mobbin-mcp`](https://github.com/aos-engineer/mobbin-mcp) that fixes Mobbin's 2026 API changes. The upstream package (v1.0.19, published 2026-07-02) is broken because Mobbin retired several internal endpoints. See [What Changed](#what-changed-in-this-fork) below.
+
 # Mobbin Skills And MCP
 
 A local-first Mobbin integration for [Mobbin](https://mobbin.com) that gives agents a durable design-reference workflow:
@@ -530,6 +532,44 @@ Priority next features:
 3. Automatic screenshot capture of shipped application flows for direct intended-vs-actual comparison.
 4. Shared HTTP-backed team storage instead of filesystem-only shared sync.
 5. Design-system extraction from saved references into reusable implementation assets.
+
+## What Changed In This Fork
+
+Mobbin changed their internal API after upstream v1.0.19 was published. This fork patches all broken endpoints:
+
+| Issue | Upstream (broken) | This fork (fixed) |
+| --- | --- | --- |
+| Searchable apps | `GET /api/searchable-apps/{platform}` → 404 | `POST /api/search-bar/fetch-searchable-apps` |
+| App logo field | `appLogoUrl` (string) | `appLogoCdnImgSources.src` (nested object) — normalized back |
+| Site logo field | `logo_url` (string) | `logoCdnImgSources.src` (nested object) — normalized back |
+| Keywords field | `keywords: string[]` | Dropped from API — guarded with `?? []` |
+| App version redirect | 307 redirect to versioned URL | 200 directly — version ID extracted from page HTML |
+| Site version redirect | Same 307 redirect | Same HTML fallback |
+| Filter definitions | `POST /api/filter-tags/fetch-dictionary-definitions` → 404 | Extracted from app RSC page stream with dedup |
+
+### Install This Fork
+
+```bash
+npm install -g github:LanSynergy/mobbin-mcp
+```
+
+### Files Changed
+
+- `src/services/api-client.ts` — New endpoint for `getSearchableApps`, normalization helpers, no-redirect fallbacks, RSC-based filter taxonomy extraction
+- `src/types.ts` — `SearchableSite.keywords` made optional
+- `src/utils/formatting.ts` — Guard against missing `keywords` in `formatSites`
+
+### Verified Working
+
+All endpoints tested and confirmed returning real data:
+
+- `search-apps` — 911 iOS apps
+- `search-screens` — screens with patterns, elements, URLs
+- `search-flows` — flows with ordered screen sequences
+- `search-sites` — 469 sites
+- `quick-search` — app + site autocomplete matches
+- `popular-apps` — category-grouped apps
+- `filters` — deduplicated filter taxonomy (screen patterns, elements, flow actions)
 
 ## License
 
