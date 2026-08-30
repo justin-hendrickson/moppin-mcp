@@ -945,12 +945,29 @@ function parseSiteSectionsFromHtml(
   site: SearchableSite,
   siteVersionId: string,
 ): SiteSectionResult[] {
-  const match = html.match(/\\"sections\\":(\[.*?\]),\\"paywalled\\":/s);
-  if (!match) return [];
+  // Mobbin changed the RSC stream structure. The old regex looked for
+  // `\"sections\":([...],\"paywalled\":` in raw HTML, but the sections array
+  // is no longer followed by `paywalled` and the first `sections` in the stream
+  // is a count, not the array. Decode the RSC stream and find the actual array
+  // by its content pattern.
+  const stream = decodeNextRscStream(html);
+  // Look for the sections array: "sections":[{"page_url": or "sections":[{"id":
+  const marker = '"sections":[{"';
+  const markerIdx = stream.indexOf(marker);
+  if (markerIdx === -1) return [];
 
-  const decodedSectionsJson = JSON.parse(`"${match[1]}"`) as string;
-  const normalizedSectionsJson = decodedSectionsJson.replace(/"\$undefined"/g, "null");
-  const rawSections = JSON.parse(normalizedSectionsJson) as RawSiteSection[];
+  const arrStart = stream.indexOf("[", markerIdx + 9);
+  if (arrStart === -1) return [];
+  const arrStr = extractBalancedArray(stream, arrStart);
+  if (!arrStr) return [];
+
+  const normalizedSectionsJson = arrStr.replace(/"\$undefined"/g, "null");
+  let rawSections: RawSiteSection[];
+  try {
+    rawSections = JSON.parse(normalizedSectionsJson) as RawSiteSection[];
+  } catch {
+    return [];
+  }
 
   return rawSections
     .map((section) => ({
