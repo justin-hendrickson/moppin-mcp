@@ -42,7 +42,7 @@ export function formatSites(sites: SearchableSite[]): string {
       `### ${i + 1}. ${site.name}`,
       `- **Tagline**: ${site.tagline}`,
       `- **Site ID**: ${site.id}`,
-      site.keywords.length > 0 ? `- **Keywords**: ${site.keywords.join(", ")}` : "",
+      (site.keywords ?? []).length > 0 ? `- **Keywords**: ${site.keywords!.join(", ")}` : "",
       site.logo_url ? `- **Logo**: ${site.logo_url}` : "",
     ]
       .filter(Boolean)

@@ -31,7 +31,7 @@ export interface SearchableSite {
   name: string;
   logo_url: string;
   tagline: string;
-  keywords: string[];
+  keywords?: string[];
 }
 
 /** A copyable section record from Mobbin's sites experience. */

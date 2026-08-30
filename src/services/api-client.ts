@@ -25,6 +25,7 @@ import type {
   SearchableSite,
   SiteSectionResult,
   ContentSearchResponse,
+  DictionaryCategory,
   ValueResponse,
 } from "../types.js";
 import type { MobbinAuth } from "./auth.js";
@@ -300,9 +301,12 @@ export class MobbinApiClient {
   }
 
   /**
-   * Resolve the latest published version ID for an app by following Mobbin's
-   * `/apps/<slug>-<platform>-<id>` 307 redirect. The slug segment may be any value
-   * (Mobbin ignores it), but it must be present.
+   * Resolve the latest published version ID for an app.
+   *
+   * Mobbin used to 307-redirect from `/apps/<slug>-<platform>-<id>` to a versioned URL
+   * like `/apps/<slug>-<platform>-<id>/<versionId>/screens`. The redirect has been removed —
+   * the page now returns 200 directly. This method tries the redirect first (for backward
+   * compatibility), then falls back to extracting the version ID from the page HTML.
    */
   private async resolveLatestAppVersionId(
     platform: string,
@@ -314,10 +318,16 @@ export class MobbinApiClient {
     });
     const location = res.headers.get("location") ?? res.url;
     const match = location.match(/\/apps\/[^/]+\/([0-9a-f-]{36})\/(?:screens|flows)/i);
-    if (!match) {
+    if (match) {
+      return match[1];
+    }
+    // No redirect — extract version ID from the page HTML
+    const html = await res.text();
+    const pageMatch = html.match(/\/apps\/[^/]+\/([0-9a-f-]{36})\/(?:screens|flows)/i);
+    if (!pageMatch) {
       throw new Error(`Unable to resolve latest version for app '${appId}' (${platform}).`);
     }
-    return match[1];
+    return pageMatch[1];
   }
 
   /**
@@ -343,7 +353,7 @@ export class MobbinApiClient {
         appCategory: app.category,
         appVersionId: versionId,
       };
-      return { meta, content };
+      return { meta, content, rawHtml: html };
     });
   }
 
@@ -512,12 +522,21 @@ export class MobbinApiClient {
   /**
    * Fetch the full list of apps for a platform (used for autocomplete cross-referencing).
    * This is a large response (~1000+ apps); results are cached by the Mobbin client.
-   * Endpoint: `GET /api/searchable-apps/{platform}`
+   *
+   * Mobbin retired `GET /api/searchable-apps/{platform}` (now 404). The replacement is
+   * `POST /api/search-bar/fetch-searchable-apps` with a `{ platform }` body. The response
+   * shape also changed: `appLogoUrl` is now `appLogoCdnImgSources.src` and `keywords` is
+   * gone. We normalize back to the {@link SearchableApp} shape so downstream code is unchanged.
    */
   async getSearchableApps(platform: string): Promise<SearchableApp[]> {
-    return this.getOrSetCache(`searchable-apps:${platform}`, 60 * 60 * 1000, () =>
-      this.request(`/api/searchable-apps/${platform}`),
-    );
+    return this.getOrSetCache(`searchable-apps:${platform}`, 60 * 60 * 1000, async () => {
+      const res = await this.request<ValueResponse<unknown[]>>(
+        "/api/search-bar/fetch-searchable-apps",
+        { method: "POST", body: { platform } },
+      );
+      const raw = Array.isArray(res.value) ? res.value : [];
+      return raw.map((app) => normalizeSearchableApp(app));
+    });
   }
 
   /**
@@ -526,11 +545,14 @@ export class MobbinApiClient {
    * Endpoint: `POST /api/search-bar/fetch-searchable-sites`
    */
   async getSearchableSites(): Promise<SearchableSite[]> {
-    return this.getOrSetCache("searchable-sites", 60 * 60 * 1000, () =>
-      this.request<ValueResponse<SearchableSite[]>>("/api/search-bar/fetch-searchable-sites", {
-        method: "POST",
-      }).then((response) => response.value),
-    );
+    return this.getOrSetCache("searchable-sites", 60 * 60 * 1000, async () => {
+      const res = await this.request<ValueResponse<unknown[]>>(
+        "/api/search-bar/fetch-searchable-sites",
+        { method: "POST" },
+      );
+      const raw = Array.isArray(res.value) ? res.value : [];
+      return raw.map((site) => normalizeSearchableSite(site));
+    });
   }
 
   /**
@@ -628,12 +650,18 @@ export class MobbinApiClient {
     const res = await this.requestText(`/sites/${slug}-${site.id}`, { redirect: "manual" });
     const location = res.headers.get("location") ?? res.url;
     const match = location.match(/\/sites\/[^/]+\/([0-9a-f-]{36})\/(?:preview|sections)/i);
-    if (!match) {
+    if (match) {
+      return match[1];
+    }
+    // No redirect — extract version ID from the page HTML
+    const html = await res.text();
+    const pageMatch = html.match(/\/sites\/[^/]+\/([0-9a-f-]{36})\/(?:preview|sections)/i);
+    if (!pageMatch) {
       throw new Error(
         `Unable to resolve latest Mobbin site version for '${site.name}' (${site.id}).`,
       );
     }
-    return match[1];
+    return pageMatch[1];
   }
 
   /**
@@ -712,15 +740,41 @@ export class MobbinApiClient {
   /**
    * Fetch the full filter taxonomy — all app categories, screen patterns,
    * UI elements, and flow actions with definitions and content counts.
-   * Endpoint: `POST /api/filter-tags/fetch-dictionary-definitions`
+   *
+   * Mobbin retired `POST /api/filter-tags/fetch-dictionary-definitions` (now 404). The filter
+   * taxonomy is now embedded in each app's RSC page. This tries the API endpoint first (for
+   * backward compatibility), then falls back to extracting definitions from a popular app's
+   * RSC page.
    */
   async getDictionaryDefinitions(): Promise<ValueResponse<unknown>> {
-    return this.getOrSetCache("dictionary-definitions", 24 * 60 * 60 * 1000, () =>
-      this.request("/api/filter-tags/fetch-dictionary-definitions", {
-        method: "POST",
-        body: {},
-      }),
-    );
+    return this.getOrSetCache("dictionary-definitions", 24 * 60 * 60 * 1000, async () => {
+      try {
+        return await this.request("/api/filter-tags/fetch-dictionary-definitions", {
+          method: "POST",
+          body: {},
+        });
+      } catch {
+        // Endpoint retired — extract from RSC page
+        const categoryMap = await this.getPopularCategoryMap("ios");
+        const firstApp = categoryMap.ordered[0];
+        if (!firstApp) {
+          return { value: [] };
+        }
+        const candidate = {
+          id: firstApp.id,
+          platform: "ios" as const,
+          name: firstApp.name,
+          logoUrl: firstApp.logoUrl,
+          tagline: "",
+          category: firstApp.category,
+          keywords: [],
+          previewScreens: [],
+        };
+        const content = await this.getAppContent(candidate);
+        const definitions = extractDictionaryDefinitionsFromRsc(content.rawHtml ?? "");
+        return { value: definitions };
+      }
+    });
   }
 
   /**
@@ -854,7 +908,7 @@ export class MobbinApiClient {
 function rankSiteMatch(site: SearchableSite, query: string): number {
   const name = site.name.toLowerCase();
   const tagline = site.tagline.toLowerCase();
-  const keywords = site.keywords.map((keyword) => keyword.toLowerCase());
+  const keywords = (site.keywords ?? []).map((keyword) => keyword.toLowerCase());
 
   if (name === query) return 0;
   if (name.startsWith(query)) return 1;
@@ -1043,6 +1097,8 @@ interface AppContentMeta {
 interface AppContent {
   meta: AppContentMeta;
   content: ParsedAppContent;
+  /** The raw HTML page — used by {@link getDictionaryDefinitions} to extract filter taxonomy. */
+  rawHtml?: string;
 }
 
 interface ParsedAppContent {
@@ -1348,6 +1404,51 @@ function mapRscFlowToResult(
   };
 }
 
+/**
+ * Normalize a raw app record from `POST /api/search-bar/fetch-searchable-apps` into the
+ * {@link SearchableApp} shape. The new API replaced `appLogoUrl` with `appLogoCdnImgSources.src`
+ * and dropped `keywords`; this maps back so downstream code is unchanged.
+ */
+function normalizeSearchableApp(raw: unknown): SearchableApp {
+  const app = (raw && typeof raw === "object") ? raw as Record<string, unknown> : {};
+  const logoSources = "appLogoCdnImgSources" in app && app.appLogoCdnImgSources !== null && typeof app.appLogoCdnImgSources === "object"
+    ? app.appLogoCdnImgSources as Record<string, unknown>
+    : {};
+  const logoSrc = "src" in logoSources && typeof logoSources.src === "string" ? logoSources.src : "";
+  const keywords = "keywords" in app && Array.isArray(app.keywords) ? app.keywords as string[] : [];
+  const previewScreens = "previewScreens" in app && Array.isArray(app.previewScreens) ? app.previewScreens as PreviewScreen[] : [];
+  return {
+    id: typeof app.id === "string" ? app.id : "",
+    platform: typeof app.platform === "string" ? app.platform : "",
+    appName: typeof app.appName === "string" ? app.appName : "",
+    appLogoUrl: logoSrc,
+    appTagline: typeof app.appTagline === "string" ? app.appTagline : "",
+    keywords,
+    previewScreens,
+  };
+}
+
+/**
+ * Normalize a raw site record from `POST /api/search-bar/fetch-searchable-sites` into the
+ * {@link SearchableSite} shape. The new API replaced `logo_url` with `logoCdnImgSources.src`
+ * and dropped `keywords`; this maps back so downstream code is unchanged.
+ */
+function normalizeSearchableSite(raw: unknown): SearchableSite {
+  const site = (raw && typeof raw === "object") ? raw as Record<string, unknown> : {};
+  const logoSources = "logoCdnImgSources" in site && site.logoCdnImgSources !== null && typeof site.logoCdnImgSources === "object"
+    ? site.logoCdnImgSources as Record<string, unknown>
+    : {};
+  const logoSrc = "src" in logoSources && typeof logoSources.src === "string" ? logoSources.src : "";
+  const keywords = "keywords" in site && Array.isArray(site.keywords) ? site.keywords as string[] : [];
+  return {
+    id: typeof site.id === "string" ? site.id : "",
+    name: typeof site.name === "string" ? site.name : "",
+    logo_url: logoSrc,
+    tagline: typeof site.tagline === "string" ? site.tagline : "",
+    keywords,
+  };
+}
+
 /** Build an {@link AppResult} from a searchable-apps record (best-effort fields where data is gone). */
 function searchableAppToResult(app: SearchableApp, category: string | undefined): AppResult {
   return {
@@ -1367,4 +1468,118 @@ function searchableAppToResult(app: SearchableApp, category: string | undefined)
     trendingMetric: 0,
     isRestricted: false,
   };
+}
+
+/**
+ * Extract filter taxonomy definitions (screen patterns, elements, flow actions) from an
+ * app's RSC page. Mobbin retired the dedicated API endpoint, but the full dictionary is
+ * still embedded in each app page's RSC stream.
+ *
+ * Returns the data in the {@link DictionaryCategory} shape so downstream code is unchanged.
+ */
+function extractDictionaryDefinitionsFromRsc(html: string): DictionaryCategory[] {
+  const stream = decodeNextRscStream(html);
+  const flatEntries: Array<Record<string, unknown>> = [];
+  for (const categorySlug of ["screenPatterns", "screenElements", "flowActions"]) {
+    const marker = `"categorySlug":"${categorySlug}"`;
+    let pos = 0;
+    while (true) {
+      const idx = stream.indexOf(marker, pos);
+      if (idx === -1) break;
+      // Walk backwards to find the enclosing object start `{`
+      let braceStart = idx;
+      let depth = 0;
+      for (let j = idx; j >= 0; j--) {
+        const c = stream[j];
+        if (c === "}") depth++;
+        else if (c === "{") {
+          if (depth === 0) { braceStart = j; break; }
+          depth--;
+        }
+      }
+      // Walk forwards to find the matching `}`
+      let braceEnd = -1;
+      depth = 0;
+      let inStr = false;
+      let esc = false;
+      for (let j = braceStart; j < stream.length; j++) {
+        const c = stream[j];
+        if (inStr) {
+          if (esc) esc = false;
+          else if (c === "\\") esc = true;
+          else if (c === '"') inStr = false;
+          continue;
+        }
+        if (c === '"') inStr = true;
+        else if (c === "{") depth++;
+        else if (c === "}") { depth--; if (depth === 0) { braceEnd = j; break; } }
+      }
+      if (braceEnd !== -1) {
+        const objStr = stream.slice(braceStart, braceEnd + 1).replace(/"\$undefined"/g, "null");
+        try {
+          const obj = JSON.parse(objStr);
+          if (obj && typeof obj === "object" && "displayName" in obj) {
+            flatEntries.push(obj as Record<string, unknown>);
+          }
+        } catch {
+          // Skip malformed objects
+        }
+      }
+      pos = idx + marker.length;
+    }
+  }
+  // Group flat entries into DictionaryCategory[] shape
+  interface SubCategoryGroup {
+    name: string;
+    entries: Array<{
+      displayName: string;
+      definition: string;
+      hidden: boolean;
+      contentCounts: Record<string, Record<string, number>>;
+    }>;
+  }
+  const categoryMap = new Map<string, { category: DictionaryCategory; subs: SubCategoryGroup[] }>();
+  const displayNames: Record<string, string> = {
+    screenPatterns: "Screen Patterns",
+    screenElements: "Screen Elements",
+    flowActions: "Flow Actions",
+  };
+  const seenEntries = new Set<string>();
+  for (const entry of flatEntries) {
+    const slug = typeof entry.categorySlug === "string" ? entry.categorySlug : "";
+    if (!slug) continue;
+    const entryDisplayName = typeof entry.displayName === "string" ? entry.displayName : "";
+    const dedupKey = `${slug}:${entryDisplayName}`;
+    if (seenEntries.has(dedupKey)) continue;
+    seenEntries.add(dedupKey);
+    if (!categoryMap.has(slug)) {
+      categoryMap.set(slug, {
+        category: {
+          slug,
+          displayName: displayNames[slug] ?? slug,
+          experience: typeof entry.categoryExperience === "string" ? entry.categoryExperience : "",
+          subCategories: [],
+        },
+        subs: [],
+      });
+    }
+    const group = categoryMap.get(slug)!;
+    const subCategoryName = typeof entry.subCategory === "string" ? entry.subCategory : "";
+    let sub = group.subs.find((s) => s.name === subCategoryName);
+    if (!sub) {
+      sub = { name: subCategoryName, entries: [] };
+      group.subs.push(sub);
+    }
+    sub.entries.push({
+      displayName: entryDisplayName,
+      definition: typeof entry.definition === "string" ? entry.definition : "",
+      hidden: false,
+      contentCounts: entry.contentCounts as Record<string, Record<string, number>> ?? {},
+    });
+  }
+  // Flatten subs into the DictionaryCategory shape
+  return Array.from(categoryMap.values()).map((group) => ({
+    ...group.category,
+    subCategories: group.subs.map((sub) => ({ entries: sub.entries })),
+  }));
 }
