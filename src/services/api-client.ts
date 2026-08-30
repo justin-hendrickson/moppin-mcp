@@ -1000,6 +1000,9 @@ function parseSiteSectionsFromHtml(
 }
 
 function buildSiteSectionImageUrl(section: RawSiteSection): string {
+  if (!section.page_image_url || typeof section.page_image_url !== "string") {
+    return "";
+  }
   const baseUrl = toBytescaleImageUrl(section.page_image_url);
   const cropHeight =
     typeof section.image_position_y_start === "number" &&
@@ -1026,7 +1029,9 @@ function buildSiteSectionImageUrl(section: RawSiteSection): string {
 }
 
 function toBytescaleImageUrl(imageUrl: string): string {
+  if (!imageUrl || typeof imageUrl !== "string") return "";
   const parsed = new URL(imageUrl);
+
   if (parsed.hostname === "bytescale.mobbin.com") {
     return `${parsed.origin}${parsed.pathname}`;
   }
