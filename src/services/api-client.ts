@@ -29,11 +29,44 @@ import type {
   ValueResponse,
 } from "../types.js";
 import type { MobbinAuth } from "./auth.js";
+import { z } from "zod";
+
+const discoveryPageSchema = z.object({
+  value: z.object({ data: z.array(z.unknown()), hasNextPage: z.boolean() }),
+});
+const apiErrorSchema = z.object({ error: z.object({ message: z.string() }) });
+const imageSourcesSchema = z.object({ src: z.string() }).nullish();
+const previewScreenSchema = z.object({
+  id: z.string(),
+  screenUrl: z.string().optional(),
+  screenCdnImgSources: imageSourcesSchema,
+});
+const appRecordSchema = z.object({
+  id: z.string().min(1),
+  platform: z.string(),
+  appName: z.string().min(1),
+  appLogoUrl: z.string().optional(),
+  appLogoCdnImgSources: imageSourcesSchema,
+  appTagline: z.string().default(""),
+  keywords: z.array(z.string()).default([]),
+  previewScreens: z.array(previewScreenSchema).default([]),
+  appVersionId: z.string().optional(),
+  appVersionPublishedAt: z.string().optional(),
+  isRestricted: z.boolean().optional(),
+});
+const siteRecordSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  tagline: z.string().default(""),
+  logo_url: z.string().optional(),
+  logoCdnImgSources: imageSourcesSchema,
+  keywords: z.array(z.string()).default([]),
+});
 
 /**
  * HTTP client for Mobbin's internal Next.js API routes.
  *
- * Mobbin has no public API — these endpoints were reverse-engineered via Playwright.
+ * This adapter uses Mobbin's website endpoints, independently of its official MCP.
  * Auth is handled via {@link MobbinAuth}, which manages the Supabase session cookie
  * and automatically refreshes tokens before they expire.
  *
@@ -105,7 +138,14 @@ export class MobbinApiClient {
         );
       }
 
-      return res.json() as Promise<T>;
+      const payload: unknown = await res.json();
+      const apiError = apiErrorSchema.safeParse(payload);
+      if (apiError.success) {
+        throw new Error(
+          `Mobbin API rejected ${path}: ${redactSensitiveText(apiError.data.error.message)}`,
+        );
+      }
+      return payload as T;
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         throw new Error(`Mobbin API request timed out after ${API_FETCH_TIMEOUT_MS}ms: ${path}`, {
@@ -116,6 +156,26 @@ export class MobbinApiClient {
     } finally {
       clearTimeout(timeoutId);
     }
+  }
+
+  private async getDiscoveryCatalog(path: string, platform?: string): Promise<unknown[]> {
+    const records: unknown[] = [];
+    for (let pageIndex = 0; pageIndex < 100; pageIndex += 1) {
+      const payload = await this.request<unknown>(path, {
+        method: "POST",
+        body: { tab: "latest", pageIndex, ...(platform ? { platform } : {}) },
+      });
+      const parsed = discoveryPageSchema.safeParse(payload);
+      if (!parsed.success) throw new Error(`Unexpected Mobbin discovery response: ${path}`);
+      const page = parsed.data.value;
+      records.push(...page.data);
+      if (!page.hasNextPage) return records;
+      if (page.data.length === 0)
+        throw new Error(`Mobbin discovery returned an empty unfinished page: ${path}`);
+    }
+    throw new Error(
+      `Mobbin discovery exceeded 100 pages: ${path}. Refusing to return a partial catalog.`,
+    );
   }
 
   /** Fetch an authenticated Mobbin page as text. Used for Next.js RSC-backed site pages. */
@@ -158,10 +218,9 @@ export class MobbinApiClient {
    * Search and browse apps with category filtering and pagination.
    *
    * Mobbin retired `POST /api/content/search-apps` (now 404). This is rebuilt on top of
-   * the still-live `/api/searchable-apps/{platform}` list, enriched with the primary
-   * category from the popular-apps endpoint. Per-app version IDs and popularity/trending
-   * metrics are no longer exposed by a browse endpoint, so those fields are best-effort
-   * (left empty / zero) — the cross-app screen and flow searches below carry the rich data.
+   * the paginated discovery catalog, enriched with the primary category from the
+   * popular-apps endpoint. Discovery provides version IDs; popularity/trending scores
+   * remain unavailable and are left at zero.
    */
   async searchApps(params: {
     platform: string;
@@ -490,7 +549,7 @@ export class MobbinApiClient {
   /**
    * Fast autocomplete search — returns matching IDs grouped by relevance.
    * Results contain only IDs; cross-reference with {@link getSearchableApps} for full details.
-   * Endpoint: `POST /api/search-bar/search`
+   * Endpoint: `POST /api/search-bar/fetch-suggestions`
    */
   async autocompleteSearch(params: {
     query: string;
@@ -508,7 +567,7 @@ export class MobbinApiClient {
     };
   }> {
     return this.getOrSetCache(`autocomplete:${JSON.stringify(params)}`, 30 * 1000, () =>
-      this.request("/api/search-bar/search", {
+      this.request("/api/search-bar/fetch-suggestions", {
         method: "POST",
         body: {
           query: params.query,
@@ -520,38 +579,29 @@ export class MobbinApiClient {
   }
 
   /**
-   * Fetch the full list of apps for a platform (used for autocomplete cross-referencing).
-   * This is a large response (~1000+ apps); results are cached by the Mobbin client.
-   *
-   * Mobbin retired `GET /api/searchable-apps/{platform}` (now 404). The replacement is
-   * `POST /api/search-bar/fetch-searchable-apps` with a `{ platform }` body. The response
-   * shape also changed: `appLogoUrl` is now `appLogoCdnImgSources.src` and `keywords` is
-   * gone. We normalize back to the {@link SearchableApp} shape so downstream code is unchanged.
+   * Read the current paginated discovery catalog. The search-bar catalog was retired.
    */
   async getSearchableApps(platform: string): Promise<SearchableApp[]> {
     return this.getOrSetCache(`searchable-apps:${platform}`, 60 * 60 * 1000, async () => {
-      const res = await this.request<ValueResponse<unknown[]>>(
-        "/api/search-bar/fetch-searchable-apps",
-        { method: "POST", body: { platform } },
+      const raw = await this.getDiscoveryCatalog(
+        "/api/discover/fetch-discover-page-apps",
+        platform,
       );
-      const raw = Array.isArray(res.value) ? res.value : [];
-      return raw.map((app) => normalizeSearchableApp(app));
+      const apps = raw.map(normalizeSearchableApp);
+      return Array.from(new Map(apps.map((app) => [app.id, app])).values());
     });
   }
 
   /**
    * Fetch the full list of Mobbin sites for client-side search/autocomplete.
    * Sites are a separate Mobbin experience from iOS/Android/Web apps.
-   * Endpoint: `POST /api/search-bar/fetch-searchable-sites`
+   * Endpoint: `POST /api/discover/fetch-discover-page-sites`, paginated until complete.
    */
   async getSearchableSites(): Promise<SearchableSite[]> {
     return this.getOrSetCache("searchable-sites", 60 * 60 * 1000, async () => {
-      const res = await this.request<ValueResponse<unknown[]>>(
-        "/api/search-bar/fetch-searchable-sites",
-        { method: "POST" },
-      );
-      const raw = Array.isArray(res.value) ? res.value : [];
-      return raw.map((site) => normalizeSearchableSite(site));
+      const raw = await this.getDiscoveryCatalog("/api/discover/fetch-discover-page-sites");
+      const sites = raw.map(normalizeSearchableSite);
+      return Array.from(new Map(sites.map((site) => [site.id, site])).values());
     });
   }
 
@@ -619,19 +669,13 @@ export class MobbinApiClient {
     query?: string;
     siteName?: string;
   }): Promise<SearchableSite> {
-    const sites = await this.getSearchableSites();
+    if (params.siteId && params.siteName) {
+      return { id: params.siteId, name: params.siteName, logo_url: "", tagline: "", keywords: [] };
+    }
     if (params.siteId) {
+      const sites = await this.getSearchableSites();
       const site = sites.find((candidate) => candidate.id === params.siteId);
       if (site) return site;
-      if (params.siteName) {
-        return {
-          id: params.siteId,
-          name: params.siteName,
-          logo_url: "",
-          tagline: "",
-          keywords: [],
-        };
-      }
       throw new Error(
         `No Mobbin site found for site_id '${params.siteId}'. Provide site_name as a fallback.`,
       );
@@ -969,22 +1013,31 @@ function parseSiteSectionsFromHtml(
     return [];
   }
 
-  return rawSections
-    .map((section) => ({
+  const available = rawSections.filter((section) => !section.restricted);
+  const restrictedCount = rawSections.length - available.length;
+  if (rawSections.length > 0 && available.length === 0) {
+    throw new Error(`Mobbin restricts all sections for '${site.name}' on this account.`);
+  }
+  return available
+    .map((section, index) => ({
       id: section.id,
       siteId: site.id,
       siteVersionId,
       siteName: site.name,
-      pageUrl: section.page_url,
+      pageUrl: section.page_url ?? "",
       type: section.type,
-      pageImageUrl: section.page_image_url,
+      pageImageUrl: section.pageCdnImgSources?.src ?? section.page_image_url ?? "",
       sectionImageUrl: buildSiteSectionImageUrl(section),
       pageVideoUrl: section.page_video_url,
       videoTimestampStartMs: section.video_timestamp_start_ms,
       videoTimestampEndMs: section.video_timestamp_end_ms,
       imagePositionYStart: section.image_position_y_start,
       imagePositionYEnd: section.image_position_y_end,
-      displayOrder: section.display_order,
+      displayOrder: section.display_order ?? index,
+      accessNotice:
+        restrictedCount > 0
+          ? `${available.length} sections accessible; ${restrictedCount} restricted sections omitted for this account.`
+          : undefined,
       patterns: section.patterns ?? [],
       popularityMetric: section.popularity_metric,
       trendingMetric: section.trending_metric,
@@ -1000,6 +1053,8 @@ function parseSiteSectionsFromHtml(
 }
 
 function buildSiteSectionImageUrl(section: RawSiteSection): string {
+  if (section.cdnImgSources?.src) return section.cdnImgSources.src;
+  if (section.custom_image_url) return section.custom_image_url;
   if (!section.page_image_url || typeof section.page_image_url !== "string") {
     return "";
   }
@@ -1067,6 +1122,10 @@ interface RawSiteSection {
   popularity_metric: number;
   trending_metric: number;
   display_order: number;
+  restricted?: boolean;
+  custom_image_url?: string | null;
+  cdnImgSources?: { src: string } | null;
+  pageCdnImgSources?: { src: string } | null;
   metadata?: {
     width?: number;
     height?: number;
@@ -1293,6 +1352,7 @@ function screenMatchesFilters(
     hasAnimation?: boolean;
   },
 ): boolean {
+  if (screen.restricted) return false;
   if (params.hasAnimation === true && !screen.animation_id) return false;
   if (params.hasAnimation === false && screen.animation_id) return false;
   if (
@@ -1319,6 +1379,7 @@ function screenMatchesFilters(
 }
 
 function flowMatchesFilters(flow: RawAppFlow, params: { flowActions?: string[] }): boolean {
+  if (flow.restricted) return false;
   if (params.flowActions && params.flowActions.length > 0) {
     return anyTagMatches(flow.actions, params.flowActions);
   }
@@ -1358,7 +1419,7 @@ function mapRscScreenToResult(
   return {
     type: screen.type ?? "curated",
     id: screen.id,
-    screenUrl: screen.screenUrl,
+    screenUrl: screen.screenCdnImgSources?.src ?? screen.screenUrl,
     fullpageScreenUrl: screen.fullpageScreenCdnImgSources?.src ?? null,
     screenNumber,
     screenPatterns: screen.screenPatterns ?? [],
@@ -1402,7 +1463,9 @@ function mapRscFlowToResult(
         hotspotWidth: ref.hotspotWidth ?? null,
         hotspotHeight: ref.hotspotHeight ?? null,
         videoTimestamp: ref.videoTimestamp ?? null,
-        screenUrl: screen?.screenUrl ?? "",
+        screenUrl: screen?.restricted
+          ? ""
+          : (screen?.screenCdnImgSources?.src ?? screen?.screenUrl ?? ""),
         screenId: ref.screenId,
         screenElements: screen?.screenElements ?? [],
         screenPatterns: screen?.screenPatterns ?? [],
@@ -1427,47 +1490,35 @@ function mapRscFlowToResult(
 }
 
 /**
- * Normalize a raw app record from `POST /api/search-bar/fetch-searchable-apps` into the
- * {@link SearchableApp} shape. The new API replaced `appLogoUrl` with `appLogoCdnImgSources.src`
- * and dropped `keywords`; this maps back so downstream code is unchanged.
+ * Normalize discovery records while retaining the image sources and access flags.
  */
 function normalizeSearchableApp(raw: unknown): SearchableApp {
-  const app = (raw && typeof raw === "object") ? raw as Record<string, unknown> : {};
-  const logoSources = "appLogoCdnImgSources" in app && app.appLogoCdnImgSources !== null && typeof app.appLogoCdnImgSources === "object"
-    ? app.appLogoCdnImgSources as Record<string, unknown>
-    : {};
-  const logoSrc = "src" in logoSources && typeof logoSources.src === "string" ? logoSources.src : "";
-  const keywords = "keywords" in app && Array.isArray(app.keywords) ? app.keywords as string[] : [];
-  const previewScreens = "previewScreens" in app && Array.isArray(app.previewScreens) ? app.previewScreens as PreviewScreen[] : [];
+  const app = appRecordSchema.parse(raw);
   return {
-    id: typeof app.id === "string" ? app.id : "",
-    platform: typeof app.platform === "string" ? app.platform : "",
-    appName: typeof app.appName === "string" ? app.appName : "",
-    appLogoUrl: logoSrc,
-    appTagline: typeof app.appTagline === "string" ? app.appTagline : "",
-    keywords,
-    previewScreens,
+    id: app.id,
+    platform: app.platform,
+    appName: app.appName,
+    appLogoUrl: app.appLogoCdnImgSources?.src ?? app.appLogoUrl ?? "",
+    appTagline: app.appTagline,
+    keywords: app.keywords,
+    previewScreens: app.previewScreens.map((screen) => ({
+      id: screen.id,
+      screenUrl: screen.screenCdnImgSources?.src ?? screen.screenUrl ?? "",
+    })),
+    appVersionId: app.appVersionId,
+    appVersionPublishedAt: app.appVersionPublishedAt,
+    isRestricted: app.isRestricted,
   };
 }
 
-/**
- * Normalize a raw site record from `POST /api/search-bar/fetch-searchable-sites` into the
- * {@link SearchableSite} shape. The new API replaced `logo_url` with `logoCdnImgSources.src`
- * and dropped `keywords`; this maps back so downstream code is unchanged.
- */
 function normalizeSearchableSite(raw: unknown): SearchableSite {
-  const site = (raw && typeof raw === "object") ? raw as Record<string, unknown> : {};
-  const logoSources = "logoCdnImgSources" in site && site.logoCdnImgSources !== null && typeof site.logoCdnImgSources === "object"
-    ? site.logoCdnImgSources as Record<string, unknown>
-    : {};
-  const logoSrc = "src" in logoSources && typeof logoSources.src === "string" ? logoSources.src : "";
-  const keywords = "keywords" in site && Array.isArray(site.keywords) ? site.keywords as string[] : [];
+  const site = siteRecordSchema.parse(raw);
   return {
-    id: typeof site.id === "string" ? site.id : "",
-    name: typeof site.name === "string" ? site.name : "",
-    logo_url: logoSrc,
-    tagline: typeof site.tagline === "string" ? site.tagline : "",
-    keywords,
+    id: site.id,
+    name: site.name,
+    tagline: site.tagline,
+    logo_url: site.logoCdnImgSources?.src ?? site.logo_url ?? "",
+    keywords: site.keywords,
   };
 }
 
@@ -1482,13 +1533,13 @@ function searchableAppToResult(app: SearchableApp, category: string | undefined)
     appTagline: app.appTagline,
     platform: app.platform,
     keywords: app.keywords ?? [],
-    appVersionId: "",
-    appVersionPublishedAt: "",
+    appVersionId: app.appVersionId ?? "",
+    appVersionPublishedAt: app.appVersionPublishedAt ?? "",
     previewScreens: app.previewScreens ?? [],
     previewVideoUrl: null,
     popularityMetric: 0,
     trendingMetric: 0,
-    isRestricted: false,
+    isRestricted: app.isRestricted ?? false,
   };
 }
 
@@ -1515,7 +1566,10 @@ function extractDictionaryDefinitionsFromRsc(html: string): DictionaryCategory[]
         const c = stream[j];
         if (c === "}") depth++;
         else if (c === "{") {
-          if (depth === 0) { braceStart = j; break; }
+          if (depth === 0) {
+            braceStart = j;
+            break;
+          }
           depth--;
         }
       }
@@ -1534,7 +1588,13 @@ function extractDictionaryDefinitionsFromRsc(html: string): DictionaryCategory[]
         }
         if (c === '"') inStr = true;
         else if (c === "{") depth++;
-        else if (c === "}") { depth--; if (depth === 0) { braceEnd = j; break; } }
+        else if (c === "}") {
+          depth--;
+          if (depth === 0) {
+            braceEnd = j;
+            break;
+          }
+        }
       }
       if (braceEnd !== -1) {
         const objStr = stream.slice(braceStart, braceEnd + 1).replace(/"\$undefined"/g, "null");
@@ -1596,7 +1656,7 @@ function extractDictionaryDefinitionsFromRsc(html: string): DictionaryCategory[]
       displayName: entryDisplayName,
       definition: typeof entry.definition === "string" ? entry.definition : "",
       hidden: false,
-      contentCounts: entry.contentCounts as Record<string, Record<string, number>> ?? {},
+      contentCounts: (entry.contentCounts as Record<string, Record<string, number>>) ?? {},
     });
   }
   // Flatten subs into the DictionaryCategory shape
