@@ -20,6 +20,9 @@ export interface SearchableApp {
   /** Search keywords associated with this app (e.g., "streaming", "fitness"). */
   keywords: string[];
   previewScreens: PreviewScreen[];
+  appVersionId?: string;
+  appVersionPublishedAt?: string;
+  isRestricted?: boolean;
 }
 
 /**
@@ -55,6 +58,7 @@ export interface SiteSectionResult {
   trendingMetric: number;
   metadata?: { width?: number; height?: number };
   textPreview?: string;
+  accessNotice?: string;
 }
 
 /**

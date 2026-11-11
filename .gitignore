@@ -14,3 +14,9 @@ dist/
 # MCPB desktop bundle build outputs
 /.mcpb-build/
 /dist-mcpb/
+
+# Private local MCP sessions and reference stores
+.mobbin-mcp/
+.moppin-mcp/
+auth.json
+auth.json.tmp

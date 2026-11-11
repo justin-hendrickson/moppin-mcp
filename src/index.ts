@@ -619,6 +619,7 @@ async function main() {
     "Search screens across iOS, Android, and Web apps on Mobbin. For Mobbin's sites collection, use mobbin_get_site_sections.",
     {
       platform: z.enum(["ios", "android", "web"]).default("ios").describe("Platform to search"),
+      app_name: z.string().optional().describe("Restrict the bounded search to an app name"),
       screen_patterns: z.array(z.string()).optional().describe("Screen patterns to filter by"),
       screen_elements: z.array(z.string()).optional().describe("UI elements to filter by"),
       screen_keywords: z
@@ -633,6 +634,7 @@ async function main() {
     },
     async ({
       platform,
+      app_name,
       screen_patterns,
       screen_elements,
       screen_keywords,
@@ -644,6 +646,7 @@ async function main() {
     }) => {
       const result = await client.searchScreens({
         platform,
+        appName: app_name,
         screenPatterns: screen_patterns,
         screenElements: screen_elements,
         screenKeywords: screen_keywords,
@@ -716,15 +719,17 @@ async function main() {
     "Search user flows/journeys across all apps on Mobbin. Filter by flow actions.",
     {
       platform: z.enum(["ios", "android", "web"]).default("ios").describe("Platform to search"),
+      app_name: z.string().optional().describe("Restrict the bounded search to an app name"),
       flow_actions: z.array(z.string()).optional().describe("Flow actions to filter by"),
       categories: z.array(z.string()).optional().describe("Filter by app categories"),
       sort_by: z.enum(["trending", "publishedAt"]).default("trending").describe("Sort order"),
       page_size: z.number().min(1).max(50).default(DEFAULT_PAGE_SIZE).describe("Results per page"),
       page_index: z.number().min(0).default(0).describe("Page number (0-indexed)"),
     },
-    async ({ platform, flow_actions, categories, sort_by, page_size, page_index }) => {
+    async ({ platform, app_name, flow_actions, categories, sort_by, page_size, page_index }) => {
       const result = await client.searchFlows({
         platform,
+        appName: app_name,
         flowActions: flow_actions,
         appCategories: categories,
         pageSize: page_size,
