@@ -1,3 +1,5 @@
+> **Maintained personal fork:** Current Mobbin website API fixes, regression tests, and portable setup instructions are in [LOCAL-REPAIR.md](LOCAL-REPAIR.md). Use that installation guide for this fork. The original upstream documentation follows for provenance.
+
 > **Fork notice:** This is a patched fork of [`@aos-engineer/mobbin-mcp`](https://github.com/aos-engineer/mobbin-mcp) that fixes Mobbin's 2026 API changes. The upstream package (v1.0.19, published 2026-07-02) is broken because Mobbin retired several internal endpoints. See [What Changed](#what-changed-in-this-fork) below.
 
 # Mobbin Skills And MCP

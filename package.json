@@ -6,13 +6,16 @@
   "main": "dist/index.js",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/aos-engineer/mobbin-mcp.git"
+    "url": "git+https://github.com/justin-hendrickson/moppin-mcp.git"
   },
-  "homepage": "https://github.com/aos-engineer/mobbin-mcp#readme",
-  "bugs": "https://github.com/aos-engineer/mobbin-mcp/issues",
+  "homepage": "https://github.com/justin-hendrickson/moppin-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/justin-hendrickson/moppin-mcp/issues"
+  },
   "bin": {
     "mobin-mcp": "dist/index.js",
-    "mobbin-mcp": "dist/index.js"
+    "mobbin-mcp": "dist/index.js",
+    "moppin-mcp": "dist/index.js"
   },
   "files": [
     "dist"
@@ -39,8 +42,8 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "sharp": "^0.34.5",
-    "zod": "^3.24.4"
+    "sharp": "^0.35.5",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
