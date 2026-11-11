@@ -262,6 +262,7 @@ async function runSearchAction(action: string, params: JsonRecord): Promise<void
   if (action === "search-screens") {
     const result = await client.searchScreens({
       platform,
+      appName: str(params.app_name),
       screenPatterns: strArray(params.screen_patterns),
       screenElements: strArray(params.screen_elements),
       screenKeywords: strArray(params.screen_keywords),
@@ -278,6 +279,7 @@ async function runSearchAction(action: string, params: JsonRecord): Promise<void
   if (action === "search-flows") {
     const result = await client.searchFlows({
       platform,
+      appName: str(params.app_name),
       flowActions: strArray(params.flow_actions),
       appCategories: strArray(params.categories),
       sortBy: str(params.sort_by) ?? "trending",
