@@ -84,7 +84,7 @@ export function formatSiteSections(sections: SiteSectionResult[]): string {
       .join("\n"),
   );
 
-  return truncate(lines.join("\n\n"));
+  return truncate([sections[0]?.accessNotice, ...lines].filter(Boolean).join("\n\n"));
 }
 
 export function formatScreens(screens: ScreenResult[]): string {
